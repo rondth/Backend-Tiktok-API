@@ -1,56 +1,74 @@
-const axios = require("axios");
+// index.js
+const { ApifyClient } = require("apify-client");
 const fs = require("fs");
-import { ApifyClient } from 'apify-client';
+const axios = require("axios");
+const readline = require("readline");
 
-const APIFY_TOKEN = "-";
-const ACTOR_ID = "scrape-creators/best-tiktok-scraper";
+// ✅ Use your Apify API token
+const client = new ApifyClient({
+  token: "-",
+});
 
-const scrapeTikTok = async () => {
+// Expand shortened TikTok URLs (vt.tiktok.com → full link)
+async function expand(shortUrl) {
   try {
-    // Read URL from input.json
-    const url = JSON.parse(fs.readFileSync("input.json", "utf8")).url;
-
-    // Start the Apify actor run
-    const startRun = await axios.post(
-      `https://api.apify.com/v2/acts/${ACTOR_ID}/runs?token=${APIFY_TOKEN}`,
-      { startUrls: [{ url }] }
-    );
-
-    const runId = startRun.data.data.id;
-    let finished = false;
-    let result;
-
-    // Poll until actor finishes
-    while (!finished) {
-      const runStatus = await axios.get(
-        `https://api.apify.com/v2/acts/${ACTOR_ID}/runs/${runId}?token=${APIFY_TOKEN}`
-      );
-      const status = runStatus.data.data.status;
-
-      if (status === "SUCCEEDED") {
-        finished = true;
-        const datasetId = runStatus.data.data.defaultDatasetId;
-        const dataset = await axios.get(
-          `https://api.apify.com/v2/datasets/${datasetId}/items?token=${APIFY_TOKEN}`
-        );
-        result = dataset.data;
-
-        // Save to result.json
-        fs.writeFileSync("result.json", JSON.stringify(result, null, 2), "utf8");
-        console.log("Data saved to result.json");
-        console.table(result);
-
-      } else if (status === "FAILED") {
-        finished = true;
-        console.error("Actor failed");
-      } else {
-        await new Promise(r => setTimeout(r, 3000));
-      }
-    }
-  } catch (error) {
-    console.error(error);
+    const res = await axios.get(shortUrl, {
+      maxRedirects: 0,
+      validateStatus: (s) => s === 301 || s === 302,
+      headers: { "User-Agent": "Mozilla/5.0" },
+    });
+    return res.headers.location || shortUrl;
+  } catch (err) {
+    console.error("URL expand error:", err.message);
+    return shortUrl;
   }
-};
+}
 
-// Run scraping immediately when node index.js is executed
-scrapeTikTok();
+// Main function
+async function runScraper(url) {
+  try {
+    // Save input.json
+    fs.writeFileSync("input.json", JSON.stringify({ url }, null, 2));
+    console.log("✅ Saved input.json");
+
+    // Expand TikTok short link
+    const expanded = await expand(url);
+    console.log("Using expanded URL:", expanded);
+
+    const input = {
+      postURLs: [expanded],
+      shouldDownloadVideos: false,
+      shouldDownloadCovers: false,
+      shouldDownloadSubtitles: false,
+      shouldDownloadSlideshowImages: false,
+      shouldDownloadAvatars: false,
+      shouldDownloadMusicCovers: false,
+    };
+
+    // Call Apify actor
+    const run = await client.actor("clockworks/tiktok-scraper").call(input);
+    console.log("Run started:", run.id);
+
+    // Fetch dataset results
+    const { items } = await client
+      .dataset(run.defaultDatasetId)
+      .listItems({ clean: true });
+
+    console.log("Items count:", items.length);
+    fs.writeFileSync("result.json", JSON.stringify(items, null, 2));
+    console.log("✅ Saved results to result.json");
+  } catch (err) {
+    console.error("Error:", err.response?.data || err.message);
+  }
+}
+
+// CLI Input
+const rl = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout,
+});
+
+rl.question("👉 Enter TikTok URL: ", async (url) => {
+  await runScraper(url);
+  rl.close();
+});
